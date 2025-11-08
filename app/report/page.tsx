@@ -13,7 +13,8 @@ import { MapDisplay } from "@/components/map-display"
 
 interface Complaint {
   id: string
-  image: string
+  image?: string  // Keep for backwards compatibility
+  images?: string[]  // New field for multiple images
   latitude: number
   longitude: number
   description: string
@@ -24,7 +25,8 @@ interface Complaint {
 export default function ReportPage() {
   const router = useRouter()
   const { toast } = useToast()
-  const [image, setImage] = useState<string | null>(null)
+  const [images, setImages] = useState<string[]>([])
+  const [isCapturing, setIsCapturing] = useState(false)
   const [description, setDescription] = useState("")
   const [location, setLocation] = useState<{ lat: number; lng: number } | null>(null)
   const [loading, setLoading] = useState(false)
@@ -32,6 +34,8 @@ export default function ReportPage() {
   const [isSubmitted, setIsSubmitted] = useState(false)
   const [showCamera, setShowCamera] = useState(false)
   const [cameraError, setCameraError] = useState<string | null>(null)
+  const [videoReady, setVideoReady] = useState(false)
+  const [flashEnabled, setFlashEnabled] = useState(false)
   const videoRef = useRef<HTMLVideoElement>(null)
   const streamRef = useRef<MediaStream | null>(null)
 
@@ -80,7 +84,7 @@ export default function ReportPage() {
     if (file) {
       const reader = new FileReader()
       reader.onload = (event) => {
-        setImage(event.target?.result as string)
+        setImages(prev => [...prev, event.target?.result as string])
       }
       reader.readAsDataURL(file)
     }
@@ -93,37 +97,46 @@ export default function ReportPage() {
         stopCamera();
       }
 
+      // Set showCamera true and videoReady false
+      setShowCamera(true);
+      setVideoReady(false);
+      
+      // Small delay to ensure the video element is in the DOM
+      await new Promise(resolve => setTimeout(resolve, 100));
+      
+      // Get the video element
+      const video = videoRef.current;
+      if (!video) {
+        throw new Error('Video element not found');
+      }
+
+      // Request camera access
       const stream = await navigator.mediaDevices.getUserMedia({
         video: { 
           facingMode: 'environment',
-          width: { ideal: 1920 },
-          height: { ideal: 1080 }
+          width: { ideal: 1280 },
+          height: { ideal: 720 }
         },
         audio: false
       });
       
-      if (videoRef.current) {
-        // Set the stream first
-        videoRef.current.srcObject = stream;
-        streamRef.current = stream;
-        
-        // Wait for the video to be ready
-        await new Promise<void>((resolve) => {
-          if (videoRef.current) {
-            videoRef.current.onloadedmetadata = () => {
-              videoRef.current?.play().then(resolve).catch(e => {
-                console.error('Error playing video:', e);
-                resolve(); // Resolve anyway to prevent hanging
-              });
-            };
-          } else {
-            resolve(); // Resolve if video ref is not available
-          }
+      // Store the stream reference
+      streamRef.current = stream;
+      
+      // Set the stream and ensure it's visible
+      video.srcObject = stream;
+      video.onloadedmetadata = () => {
+        video.play().then(() => {
+          // Video is playing, hide loading overlay
+          setVideoReady(true);
+        }).catch(e => {
+          console.error('Error playing video:', e);
+          setCameraError('Failed to start camera feed');
         });
-        
-        setShowCamera(true);
-        setCameraError(null);
-      }
+      };
+      
+      // Set camera error to null when everything is working
+      setCameraError(null);
     } catch (err) {
       console.error("Error accessing camera:", err);
       const errorMessage = err instanceof Error ? err.message : 'Could not access camera';
@@ -134,31 +147,97 @@ export default function ReportPage() {
         variant: "destructive",
       });
       setShowCamera(false);
+      setVideoReady(false);
     }
   };
 
   const stopCamera = () => {
-    if (videoRef.current && videoRef.current.srcObject) {
-      const tracks = (videoRef.current.srcObject as MediaStream).getTracks();
-      tracks.forEach(track => track.stop());
-      videoRef.current.srcObject = null;
+    if (videoRef.current) {
+      if (videoRef.current.srcObject) {
+        const tracks = (videoRef.current.srcObject as MediaStream).getTracks();
+        tracks.forEach(track => track.stop());
+        videoRef.current.srcObject = null;
+      }
       setShowCamera(false);
+      setVideoReady(false);
+      setIsCapturing(false);
+      setFlashEnabled(false);
     }
   };
 
-  const captureImage = () => {
-    if (videoRef.current) {
-      const canvas = document.createElement('canvas');
-      const video = videoRef.current;
-      canvas.width = video.videoWidth;
-      canvas.height = video.videoHeight;
-      const ctx = canvas.getContext('2d');
+  const toggleFlash = async () => {
+    try {
+      const stream = streamRef.current;
+      if (!stream) return;
       
-      if (ctx) {
-        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-        const imageDataUrl = canvas.toDataURL('image/jpeg');
-        setImage(imageDataUrl);
-        stopCamera();
+      const track = stream.getVideoTracks()[0];
+      const capabilities = track.getCapabilities() as any;
+      
+      if (capabilities.torch) {
+        await track.applyConstraints({
+          advanced: [{ torch: !flashEnabled } as any]
+        });
+        setFlashEnabled(!flashEnabled);
+      } else {
+        toast({
+          title: 'Flash not available',
+          description: 'Your device does not support camera flash',
+          variant: 'destructive',
+        });
+      }
+    } catch (error) {
+      console.error('Error toggling flash:', error);
+      toast({
+        title: 'Flash error',
+        description: 'Could not toggle camera flash',
+        variant: 'destructive',
+      });
+    }
+  };
+
+  const [captureSuccess, setCaptureSuccess] = useState(false);
+
+  const captureImage = async () => {
+    if (videoRef.current && !isCapturing) {
+      try {
+        setIsCapturing(true);
+        const canvas = document.createElement('canvas');
+        const video = videoRef.current;
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        const ctx = canvas.getContext('2d');
+        
+        if (ctx) {
+          // Draw the current video frame
+          ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+          
+          // Convert to data URL and add to images array
+          const imageDataUrl = canvas.toDataURL('image/jpeg');
+          setImages(prev => [...prev, imageDataUrl]);
+          
+          // Show success feedback with flash and checkmark
+          setCaptureSuccess(true);
+          await new Promise(resolve => setTimeout(resolve, 800));
+          setCaptureSuccess(false);
+          
+          // Keep camera open for more photos - don't close
+          // stopCamera();
+          
+          // Show success toast
+          toast({
+            title: '✓ Photo captured',
+            description: `${images.length + 1} photo${images.length + 1 !== 1 ? 's' : ''} ready to submit`,
+          });
+        }
+      } catch (error) {
+        console.error('Error capturing image:', error);
+        toast({
+          title: 'Error',
+          description: 'Failed to capture image',
+          variant: 'destructive',
+        });
+      } finally {
+        setIsCapturing(false);
       }
     }
   };
@@ -166,7 +245,7 @@ export default function ReportPage() {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
 
-    if (!image) {
+    if (images.length === 0) {
       toast({
         title: "Missing Photo",
         description: "Please upload a photo of the littered area.",
@@ -189,7 +268,8 @@ export default function ReportPage() {
     try {
       const complaint: Complaint = {
         id: Date.now().toString(),
-        image,
+        images: images, // Save all captured images
+        image: images[0], // Keep first image for backwards compatibility
         latitude: location.lat,
         longitude: location.lng,
         description,
@@ -283,7 +363,7 @@ export default function ReportPage() {
                       <p className="text-sm text-gray-600">Latitude: {location.lat.toFixed(6)}</p>
                       <p className="text-sm text-gray-600">Longitude: {location.lng.toFixed(6)}</p>
                     </div>
-                    <MapDisplay latitude={location.lat} longitude={location.lng} />
+                    <MapDisplay latitude={location.lat} longitude={location.lng}></MapDisplay>
                   </div>
                 ) : (
                   <p className="text-red-600 text-sm">Unable to access location</p>
@@ -300,45 +380,154 @@ export default function ReportPage() {
               </label>
               
               {showCamera ? (
-                <div className="space-y-4">
-                  <div className="relative bg-black rounded-lg overflow-hidden">
-                    <div className="relative w-full bg-black rounded-lg overflow-hidden">
-                      <video
-                        ref={videoRef}
-                        autoPlay
-                        playsInline
-                        muted
-                        className="w-full h-auto max-h-[60vh] object-cover"
-                      />
-                      <div className="absolute inset-0 flex items-center justify-center">
-                        <div className="animate-pulse text-white">
-                          <Camera className="w-12 h-12 mx-auto mb-2" />
-                          <p>Initializing camera...</p>
+                <div className="relative bg-black rounded-2xl overflow-hidden shadow-2xl">
+                  {/* Camera view container */}
+                  <div className="relative w-full aspect-[9/16] max-h-[70vh] bg-black">
+                    {/* Video feed */}
+                    <video
+                      ref={videoRef}
+                      autoPlay
+                      playsInline
+                      muted
+                      className="w-full h-full object-cover"
+                    />
+                    
+                    {/* Success checkmark animation */}
+                    {captureSuccess && (
+                      <div className="absolute inset-0 flex items-center justify-center z-20 pointer-events-none">
+                        <div className="relative">
+                          <div className="absolute inset-0 w-20 h-20 -left-10 -top-10 rounded-full bg-emerald-500/30 animate-ping"></div>
+                          <div className="relative w-20 h-20 rounded-full bg-emerald-500 flex items-center justify-center shadow-lg">
+                            <svg className="w-12 h-12 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M5 13l4 4L19 7"></path>
+                            </svg>
+                          </div>
                         </div>
                       </div>
+                    )}
+                    
+                    {/* Top bar with controls */}
+                    <div className="absolute top-0 left-0 right-0 p-4 flex items-center justify-between z-10">
+                      {/* Left side controls */}
+                      <div className="flex items-center gap-2">
+                        {/* Close button */}
+                        <button
+                          type="button"
+                          onClick={stopCamera}
+                          className="p-2.5 rounded-full bg-black/50 backdrop-blur-sm text-white hover:bg-black/70 transition-all"
+                          title="Close camera"
+                        >
+                          <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                          </svg>
+                        </button>
+                        
+                        {/* Flash toggle button */}
+                        <button
+                          type="button"
+                          onClick={toggleFlash}
+                          className={`p-2.5 rounded-full backdrop-blur-sm transition-all ${
+                            flashEnabled 
+                              ? 'bg-yellow-500 text-white hover:bg-yellow-600' 
+                              : 'bg-black/50 text-white hover:bg-black/70'
+                          }`}
+                          title={flashEnabled ? 'Turn off flash' : 'Turn on flash'}
+                        >
+                          {flashEnabled ? (
+                            <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" viewBox="0 0 24 24" fill="currentColor">
+                              <path d="M11.19 1.36a1 1 0 0 1 1.62 0l2.63 3.54 4.38.38a1 1 0 0 1 .82 1.45l-2.24 4.03 2.24 4.03a1 1 0 0 1-.82 1.45l-4.38.38-2.63 3.54a1 1 0 0 1-1.62 0l-2.63-3.54-4.38-.38a1 1 0 0 1-.82-1.45l2.24-4.03-2.24-4.03a1 1 0 0 1 .82-1.45l4.38-.38 2.63-3.54Z" />
+                            </svg>
+                          ) : (
+                            <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
+                            </svg>
+                          )}
+                        </button>
+                      </div>
+                      
+                      {/* Photo counter badge */}
+                      {images.length > 0 && (
+                        <div className="px-4 py-2 rounded-full bg-emerald-500 text-white font-semibold text-sm shadow-lg flex items-center gap-2">
+                          <Camera className="w-4 h-4" />
+                          {images.length}
+                        </div>
+                      )}
                     </div>
-                    <div className="absolute inset-0 flex items-center justify-center">
-                      <button
-                        type="button"
-                        onClick={captureImage}
-                        className="bg-white rounded-full p-3 shadow-lg hover:bg-gray-100 transition-colors"
-                        title="Take photo"
-                      >
-                        <Camera className="w-6 h-6 text-gray-800" />
-                      </button>
+                    
+                    {/* Bottom controls */}
+                    <div className="absolute bottom-0 left-0 right-0 p-6 z-10">
+                      <div className="flex items-center justify-center gap-8">
+                        {/* Spacer for symmetry */}
+                        <div className="w-14"></div>
+                        
+                        {/* Capture button */}
+                        <button
+                          type="button"
+                          onClick={captureImage}
+                          disabled={isCapturing}
+                          className={`relative transition-transform ${
+                            isCapturing ? 'scale-95' : 'hover:scale-105 active:scale-95'
+                          }`}
+                          title="Take photo"
+                        >
+                          {/* Outer ring */}
+                          <div className="w-20 h-20 rounded-full border-4 border-white flex items-center justify-center">
+                            {/* Inner button */}
+                            <div className={`w-16 h-16 rounded-full transition-all ${
+                              isCapturing ? 'bg-gray-300' : 'bg-white'
+                            }`}>
+                              {isCapturing && (
+                                <div className="w-full h-full flex items-center justify-center">
+                                  <div className="w-3 h-3 bg-gray-600 rounded-full animate-pulse"></div>
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        </button>
+                        
+                        {/* Done button (right side) */}
+                        <button
+                          type="button"
+                          onClick={stopCamera}
+                          disabled={images.length === 0}
+                          className={`w-14 h-14 rounded-full flex items-center justify-center transition-all ${
+                            images.length > 0
+                              ? 'bg-emerald-500 hover:bg-emerald-600 text-white shadow-lg'
+                              : 'bg-white/20 text-white/50 cursor-not-allowed'
+                          }`}
+                          title={images.length > 0 ? 'Done' : 'Take at least one photo'}
+                        >
+                          <svg xmlns="http://www.w3.org/2000/svg" className="h-7 w-7" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" />
+                          </svg>
+                        </button>
+                      </div>
+                      
+                      {/* Help text */}
+                      {/* <div className="text-center mt-4">
+                        <p className="text-white text-sm font-medium drop-shadow-lg">
+                          {images.length === 0 ? 'Tap to capture' : `${images.length} photo${images.length !== 1 ? 's' : ''} • Tap ✓ when done`}
+                        </p>
+                      </div> */}
                     </div>
-                    <button
-                      type="button"
-                      onClick={stopCamera}
-                      className="absolute top-2 right-2 bg-red-500 text-white rounded-full p-1"
-                      title="Close camera"
-                    >
-                      <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
-                        <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
-                      </svg>
-                    </button>
+                    
+                    {/* Loading state overlay */}
+                    {!videoReady && (
+                      <div className="absolute inset-0 flex items-center justify-center bg-black/90 z-20">
+                        <div className="text-center">
+                          <Loader2 className="w-12 h-12 text-white animate-spin mx-auto mb-4" />
+                          <p className="text-white font-medium">Starting camera...</p>
+                          <p className="text-white/60 text-sm mt-2">Please allow camera access</p>
+                        </div>
+                      </div>
+                    )}
                   </div>
-                  {cameraError && <p className="text-red-500 text-sm">{cameraError}</p>}
+                  
+                  {cameraError && (
+                    <div className="p-4 bg-red-50 border-t border-red-200">
+                      <p className="text-red-600 text-sm font-medium">{cameraError}</p>
+                    </div>
+                  )}
                 </div>
               ) : (
                 <div className="space-y-4">
@@ -380,27 +569,39 @@ export default function ReportPage() {
                       </button>
                     </div>
                   </div>
-                  {image ? (
-                    <div className="mt-4 space-y-2">
-                      <img
-                        src={image}
-                        alt="Preview"
-                        className="w-full h-48 object-cover rounded"
-                      />
-                      <div className="flex justify-center space-x-4 mt-2">
+                  {images.length > 0 ? (
+                    <div className="mt-4">
+                      <div className="grid grid-cols-2 gap-3">
+                        {images.map((img, index) => (
+                          <div key={index} className="relative group">
+                            <img
+                              src={img}
+                              alt={`Capture ${index + 1}`}
+                              className="w-full h-32 object-cover rounded-lg"
+                            />
+                            <button
+                              onClick={() => setImages(prev => prev.filter((_, i) => i !== index))}
+                              className="absolute top-1 right-1 bg-red-500 text-white rounded-full w-5 h-5 flex items-center justify-center text-xs opacity-0 group-hover:opacity-100 transition-opacity"
+                            >
+                              ×
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                      <div className="flex justify-center space-x-4 mt-4">
                         <button
                           type="button"
-                          onClick={() => setImage(null)}
+                          onClick={() => setImages([])}
                           className="text-sm text-red-600 hover:text-red-800 font-medium"
                         >
-                          Remove photo
+                          Remove all
                         </button>
                         <button
                           type="button"
                           onClick={startCamera}
                           className="text-sm text-emerald-600 hover:text-emerald-800 font-medium"
                         >
-                          Retake photo
+                          {images.length > 0 ? 'Add more photos' : 'Take photos'}
                         </button>
                       </div>
                     </div>
@@ -436,7 +637,7 @@ export default function ReportPage() {
             <div className="flex gap-3">
               <Button
                 type="submit"
-                disabled={loading || !location || !image}
+                disabled={loading || !location || images.length === 0}
                 className="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white"
               >
                 {loading ? (
