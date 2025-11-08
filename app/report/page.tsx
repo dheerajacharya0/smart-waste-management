@@ -87,22 +87,33 @@ export default function ReportPage() {
   }
 
   const startCamera = async () => {
-    if (!location) {
-      toast({
-        title: "Location Required",
-        description: "Please enable location services before taking a photo.",
-        variant: "destructive",
-      })
-      return
-    }
-
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: 'environment' },
+      // Stop any existing stream first
+      if (streamRef.current) {
+        stopCamera();
+      }
+
+      const constraints = {
+        video: { 
+          facingMode: 'environment',
+          width: { ideal: 1920 },
+          height: { ideal: 1080 }
+        },
         audio: false
-      });
+      };
+      
+      const stream = await navigator.mediaDevices.getUserMedia(constraints);
       
       if (videoRef.current) {
+        // Wait for the video element to be ready
+        await new Promise((resolve) => {
+          if (videoRef.current) {
+            videoRef.current.onloadedmetadata = () => {
+              videoRef.current?.play().then(resolve).catch(console.error);
+            };
+          }
+        });
+
         videoRef.current.srcObject = stream;
         streamRef.current = stream;
         setShowCamera(true);
@@ -110,12 +121,14 @@ export default function ReportPage() {
       }
     } catch (err) {
       console.error("Error accessing camera:", err);
-      setCameraError("Could not access camera. Please check permissions and try again.");
+      const errorMessage = err instanceof Error ? err.message : 'Could not access camera';
+      setCameraError(errorMessage);
       toast({
         title: "Camera Error",
-        description: "Could not access camera. Please check permissions and try again.",
+        description: errorMessage,
         variant: "destructive",
       });
+      setShowCamera(false);
     }
   };
 
@@ -285,7 +298,8 @@ export default function ReportPage() {
                       ref={videoRef}
                       autoPlay
                       playsInline
-                      className="w-full h-auto"
+                      muted
+                      className="w-full h-auto max-h-[60vh] object-cover"
                     />
                     <div className="absolute inset-0 flex items-center justify-center">
                       <button
