@@ -93,29 +93,34 @@ export default function ReportPage() {
         stopCamera();
       }
 
-      const constraints = {
+      const stream = await navigator.mediaDevices.getUserMedia({
         video: { 
           facingMode: 'environment',
           width: { ideal: 1920 },
           height: { ideal: 1080 }
         },
         audio: false
-      };
-      
-      const stream = await navigator.mediaDevices.getUserMedia(constraints);
+      });
       
       if (videoRef.current) {
-        // Wait for the video element to be ready
-        await new Promise((resolve) => {
-          if (videoRef.current) {
-            videoRef.current.onloadedmetadata = () => {
-              videoRef.current?.play().then(resolve).catch(console.error);
-            };
-          }
-        });
-
+        // Set the stream first
         videoRef.current.srcObject = stream;
         streamRef.current = stream;
+        
+        // Wait for the video to be ready
+        await new Promise<void>((resolve) => {
+          if (videoRef.current) {
+            videoRef.current.onloadedmetadata = () => {
+              videoRef.current?.play().then(resolve).catch(e => {
+                console.error('Error playing video:', e);
+                resolve(); // Resolve anyway to prevent hanging
+              });
+            };
+          } else {
+            resolve(); // Resolve if video ref is not available
+          }
+        });
+        
         setShowCamera(true);
         setCameraError(null);
       }
@@ -133,8 +138,10 @@ export default function ReportPage() {
   };
 
   const stopCamera = () => {
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach(track => track.stop());
+    if (videoRef.current && videoRef.current.srcObject) {
+      const tracks = (videoRef.current.srcObject as MediaStream).getTracks();
+      tracks.forEach(track => track.stop());
+      videoRef.current.srcObject = null;
       setShowCamera(false);
     }
   };
@@ -142,12 +149,13 @@ export default function ReportPage() {
   const captureImage = () => {
     if (videoRef.current) {
       const canvas = document.createElement('canvas');
-      canvas.width = videoRef.current.videoWidth;
-      canvas.height = videoRef.current.videoHeight;
+      const video = videoRef.current;
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
       const ctx = canvas.getContext('2d');
       
       if (ctx) {
-        ctx.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
         const imageDataUrl = canvas.toDataURL('image/jpeg');
         setImage(imageDataUrl);
         stopCamera();
@@ -294,13 +302,21 @@ export default function ReportPage() {
               {showCamera ? (
                 <div className="space-y-4">
                   <div className="relative bg-black rounded-lg overflow-hidden">
-                    <video
-                      ref={videoRef}
-                      autoPlay
-                      playsInline
-                      muted
-                      className="w-full h-auto max-h-[60vh] object-cover"
-                    />
+                    <div className="relative w-full bg-black rounded-lg overflow-hidden">
+                      <video
+                        ref={videoRef}
+                        autoPlay
+                        playsInline
+                        muted
+                        className="w-full h-auto max-h-[60vh] object-cover"
+                      />
+                      <div className="absolute inset-0 flex items-center justify-center">
+                        <div className="animate-pulse text-white">
+                          <Camera className="w-12 h-12 mx-auto mb-2" />
+                          <p>Initializing camera...</p>
+                        </div>
+                      </div>
+                    </div>
                     <div className="absolute inset-0 flex items-center justify-center">
                       <button
                         type="button"
